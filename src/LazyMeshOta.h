@@ -1,11 +1,23 @@
 #ifndef LAZYMESHOTA_H
 #define LAZYMESHOTA_H
 
-#include <ESP8266WiFi.h>
-#include <StreamString.h>
-#include <flash_hal.h>
+#include <Arduino.h>
+#include <WString.h>
+#include <assert.h>
+
+#include <algorithm>
+#if defined(EPOXY_DUINO)
+#include "fake_update.h"
+#include "fake_wifi.h"
+
+// Some virtual functions not supported by epoxy stubs.
+#define NON_EPOXY_OVERRIDE
+#else
 #include <lwip/prot/ethernet.h>
-#include <wifi_raw.h> // https://github.com/shkoo/esp8266_wifi_raw
+#include <user_interface.h>
+#include <wifi_raw.h>  // https://github.com/shkoo/esp8266_wifi_raw
+#define NON_EPOXY_OVERRIDE override
+#endif
 
 // LazyMeshOta propagates a new version of firmware automatically when
 // any node comes into wifi range of a node with a higher version.
@@ -29,11 +41,18 @@ class LazyMeshOta {
   //
   // bssid should be unique for this sketch, otherwise we could try to
   // upgrade to a different sketch.
-  LazyMeshOta(int version, eth_addr bssid);
-  ~LazyMeshOta();
+  LazyMeshOta() = default;
+  ~LazyMeshOta() { end(); }
 
-  void register_wifi_cb() { wifi_raw_set_recv_cb(on_receive_raw_frame); }
-  static void on_receive_raw_frame(RxPacket*);
+  void begin(String sketchName, int version, eth_addr bssid);
+  void end();
+  void register_wifi_cb() {
+    assert(!_instance);
+    _instance = this;
+    wifi_raw_set_recv_cb(onReceiveRawFrameCallback);
+  }
+  void onReceiveRawFrame(RxPacket*);
+  static void onReceiveRawFrameCallback(RxPacket*);
 
   // Call this in loop()
   void loop();
@@ -45,7 +64,8 @@ class LazyMeshOta {
 
  private:
   enum class PKT_TYPE : uint8_t {
-    // Advertise current version as "<version>\n<sketchsize>\n<md5dum>\n<src bssid>\n".
+    // Advertise current version as "<sketchName>\n<version>\n<sketchsize>\n<md5dum>\n<src
+    // bssid>\n".
     // Replies are expected to be sent with the given soure bssid.
     ADVERTISE,
 
@@ -71,14 +91,75 @@ class LazyMeshOta {
 
     uint32_t retryCount = 0;
   };
+  class BufStream : public Stream {
+   public:
+    static constexpr uint32_t bufStreamSize = 2048;
+    void reset(uint8_t* buf, uint32_t len) {
+      assert(len <= bufStreamSize);
+      memcpy(_buf, buf, len);
+      _pos = 0;
+      _len = len;
+    }
+    int available() override {
+      assert(_len >= _pos);
+      return _len - _pos;
+    }
+    int read() override {
+      assert(_len >= _pos);
+      if (_len == _pos) {
+        return -1;
+      }
+      return _buf[_pos++];
+    }
+    int read(uint8_t* buffer, size_t len) NON_EPOXY_OVERRIDE {
+      assert(_len >= _pos);
+      uint32_t actual = std::min<size_t>(len, _len - _pos);
+      memcpy(buffer, _buf + _pos, actual);
+      return actual;
+    }
+    int peek() override {
+      assert(_len >= _pos);
+      if (_len == _pos) {
+        return -1;
+      }
+      return _buf[_pos];
+    }
+
+    bool hasPeekBufferAPI() const NON_EPOXY_OVERRIDE { return true; }
+
+    size_t peekAvailable() NON_EPOXY_OVERRIDE {
+      assert(_len >= _pos);
+      return _len - _pos;
+    }
+
+    const char* peekBuffer() NON_EPOXY_OVERRIDE { return _buf + _pos; }
+
+    void peekConsume(size_t consume) NON_EPOXY_OVERRIDE {
+      assert(_len >= _pos);
+      assert(consume + _pos <= _len);
+      _pos += consume;
+    }
+
+    bool inputCanTimeout() NON_EPOXY_OVERRIDE { return false; }
+    virtual size_t write(uint8_t) override { return 0; }
+
+   private:
+    char _buf[bufStreamSize];
+    uint32_t _pos = 0;
+    uint32_t _len = 0;
+  };
 
   //  static constexpr uint32_t advertiseInterval = 60000; // Advertise our version every 60
   //  seconds.
   static constexpr uint32_t advertiseInterval = 5000;
+
+#if defined(EPOXY_DUINO)
+  static constexpr uint32_t receiveTimeoutInterval = 500;
+  static constexpr uint16_t bufferSize = 4;  // Number of bytes to transfer per packet.
+#else
   static constexpr uint32_t receiveTimeoutInterval = 1000;  // Time out receive after 1000ms.
-
-  static constexpr uint16_t bufferSize = 1024;  // Number of bytes to transfer per packet.
-
+  static constexpr uint16_t bufferSize = 1024;              // Number of bytes to transfer per packet.
+#endif
   static constexpr uint16_t maxRetries = 10;  // Number of times to try a block before giving up.
 
   void _transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, String msg);
@@ -87,13 +168,13 @@ class LazyMeshOta {
   void _tracePacket(uint8_t* pkt, uint32_t len, uint32_t hdr_start);
 
   void _advertise();
-  void _receiveAdvertise(const eth_addr& src, Stream& body);
+  void _receiveAdvertise(const eth_addr& src, BufStream& body);
   void _startUpdate(const eth_addr& src, const eth_addr& bssid, int version, uint32_t sketchsize,
                     String md5sum);
   void _requestNextBlock();
   void _receiveTimeout();
-  void _receiveReq(const eth_addr& src, Stream& body);
-  void _receiveReply(const eth_addr& src, Stream& body);
+  void _receiveReq(const eth_addr& src, BufStream& body);
+  void _receiveReply(const eth_addr& src, BufStream& body);
 
   // timestamp in millis of next version advertisement
   uint32_t _nextAdvertise = 0;
@@ -106,9 +187,10 @@ class LazyMeshOta {
   volatile bool _receivedPacket = false;
   PKT_TYPE _receivedPacketType;
   eth_addr _receivedSrc;
-  StreamString _receivedBody;
+  BufStream _receivedBody;
 
   // Version of our current sketch.
+  String _localSketchName;
   int _localVersion;
   String _localSketchMd5;
   uint32_t _localSketchSize;
@@ -116,6 +198,9 @@ class LazyMeshOta {
 
   // New version download in progress.
   update_t* _update = nullptr;
+
+  // True if an update is complete; we then just wait for reboot.
+  bool _updateSucceeded = false;
 
   // Static for performance in on_receive_raw_frame.
   static eth_addr _bssid;
