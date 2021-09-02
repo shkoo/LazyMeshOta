@@ -44,7 +44,7 @@ class LazyMeshOta {
   LazyMeshOta() = default;
   ~LazyMeshOta() { end(); }
 
-  void begin(String sketchName, int version, eth_addr bssid);
+  void begin(String sketchName, int version);
   void end();
   void register_wifi_cb() {
     assert(!_instance);
@@ -162,6 +162,8 @@ class LazyMeshOta {
 #endif
   static constexpr uint16_t maxRetries = 10;  // Number of times to try a block before giving up.
 
+  eth_addr _getLocalBssid();
+
   void _transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, String msg);
   void _receive(uint8_t* frm, uint16_t len);
 
@@ -202,9 +204,7 @@ class LazyMeshOta {
   // True if an update is complete; we then just wait for reboot.
   bool _updateSucceeded = false;
 
-  // Static for performance in on_receive_raw_frame.
-  static eth_addr _bssid;
-
+  // For the register_wifi_cb convenience method
   static LazyMeshOta* _instance;
 };
 

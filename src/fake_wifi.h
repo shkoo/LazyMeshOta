@@ -29,7 +29,9 @@ extern void wifi_raw_set_recv_cb(wifi_raw_recv_cb_fn rx_fn);
 // esp8266 core stubs
 struct FakeWifiContext {
  public:
-  FakeWifiContext(eth_addr macaddrArg) : macaddr(macaddrArg) { enable(); }
+  FakeWifiContext(eth_addr macaddrArg, eth_addr bssidArg) : macaddr(macaddrArg), bssid(bssidArg) {
+    enable();
+  }
 
   void enable() { curContext = this; }
 
@@ -41,6 +43,7 @@ struct FakeWifiContext {
   }
 
   eth_addr macaddr;
+  eth_addr bssid;
 
   // Current context being processed
   static FakeWifiContext* curContext;
@@ -62,6 +65,15 @@ static inline int wifi_send_pkt_freedom(uint8_t* buf, int len, bool /* sys_seq *
   rawWifiPacket->rx_ctl.rssi = 1;
   rawWifiPacket->rx_ctl.legacy_length = len;
   return len;
+}
+
+struct station_config {
+  uint8_t bssid[6];
+};
+
+static inline void wifi_station_get_config(station_config* sc) {
+  assert(FakeWifiContext::curContext);
+  memcpy(sc->bssid, &FakeWifiContext::curContext->bssid, sizeof(sc->bssid));
 }
 
 #endif

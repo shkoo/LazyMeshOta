@@ -13,7 +13,6 @@ static constexpr eth_addr ethBroadcast = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 static constexpr int tracePackets = 0;
 
 LazyMeshOta* LazyMeshOta::_instance = nullptr;
-eth_addr LazyMeshOta::_bssid;
 
 #if !defined(EPOXY_DUINO)
 // If not testing, run real versions of these functions from the ESP core.
@@ -170,12 +169,11 @@ defined in ISO/IEC 8802-2: 1998
 
 */
 
-void LazyMeshOta::begin(String sketchName, int version, eth_addr bssid) {
+void LazyMeshOta::begin(String sketchName, int version) {
   _localSketchName = sketchName;
   _localSketchMd5 = getSketchMD5();
   _localSketchSize = getSketchSize();
 
-  _bssid = bssid;
   _localVersion = version;
   assert(wifi_get_macaddr(0, _localEthAddr.addr));
 
@@ -239,7 +237,7 @@ void LazyMeshOta::_advertise() {
   }
   _transmit(PKT_TYPE::ADVERTISE, ethBroadcast, ethBroadcast /* bssid */,
             _localSketchName + "\n" + String(_localVersion) + "\n" + String(_localSketchSize) +
-                "\n" + _localSketchMd5 + "\n" + ethToString(_bssid) + "\n");
+                "\n" + _localSketchMd5 + "\n" + ethToString(_getLocalBssid()) + "\n");
 }
 
 void LazyMeshOta::_transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, String msg) {
@@ -286,28 +284,30 @@ void LazyMeshOta::onReceiveRawFrame(RxPacket* pkt) {
   }
   hdr_t* hdr = reinterpret_cast<hdr_t*>(frm);
   if (hdr->dsap != hdr_t().dsap) {
-    // Different protocol than ours.
+    // Different protocol than ours; skip.
     if (tracePackets) {
       Serial.printf("dsap(%02x)", hdr->dsap);
     }
     return;
   }
-  eth_addr hdr_bssid;
-  memcpy(&hdr_bssid, frm + offsetof(hdr_t, bssid), sizeof(hdr_bssid));
-  if (memcmp(&hdr_bssid, &_bssid, sizeof(_bssid)) != 0 &&
-      memcmp(&hdr_bssid, &ethBroadcast, sizeof(ethBroadcast)) != 0) {
-#ifdef DEBUG_BSSID_MATCH
-    String bssidstr = ethToString(hdr_bssid);
-    static std::set<String> seen_bssids;
-
-    if (seen_bssids.insert(bssidstr).second) {
-      Serial.print("wrong bssid " + bssidstr + "\n");
-    } else
-#endif
-      return;
+  if (memcmp(&hdr->dest, &_localEthAddr, sizeof(_localEthAddr)) != 0 &&
+      memcmp(&hdr->dest, &ethBroadcast, sizeof(ethBroadcast))) {
+    // Not to us.
+    if (tracePackets) {
+      Serial.println("Received packet to wrong target " + ethToString(hdr->dest));
+    }
+    return;
   }
 
   _receive(frm, len);
+}
+
+eth_addr LazyMeshOta::_getLocalBssid() {
+  eth_addr bssid;
+  station_config sc;
+  wifi_station_get_config(&sc);
+  memcpy(&bssid, sc.bssid, sizeof(bssid));
+  return bssid;
 }
 
 void LazyMeshOta::_receive(uint8_t* frm, uint16_t tot_len) {
@@ -497,7 +497,7 @@ void LazyMeshOta::_requestNextBlock() {
   }
 
   _transmit(PKT_TYPE::REQ, _update->src, _update->bssid,
-            ethToString(_bssid) + "\n" + String(_update->offset) + "\n");
+            ethToString(_getLocalBssid()) + "\n" + String(_update->offset) + "\n");
   _nextReceiveTimeout = millis() + receiveTimeoutInterval;
 }
 

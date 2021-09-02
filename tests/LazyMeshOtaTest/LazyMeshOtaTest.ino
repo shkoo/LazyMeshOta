@@ -29,20 +29,20 @@ void runSome(LazyMeshOta& ota, FakeWifiContext& wifiCtx, FakeUpdateContext& upda
 
 test(simpleTest) {
   LazyMeshOta lmo;
-  lmo.begin("LazyMeshOtaTest", 1, {1, 2, 3, 4, 5, 6});
+  lmo.begin("LazyMeshOtaTest", 1);
   lmo.end();
 }
 
 test(noTransferTest) {
-  FakeWifiContext wifi1({1, 2, 3, 4, 5, 6});
+  FakeWifiContext wifi1({1, 2, 3, 4, 5, 6}, testBssid);
   FakeUpdateContext update1("sketch1", 12345);
   LazyMeshOta lmo1;
-  lmo1.begin("noTransferTest", 1, testBssid);
+  lmo1.begin("noTransferTest", 1);
 
-  FakeWifiContext wifi2({7, 8, 9, 10, 11, 12});
+  FakeWifiContext wifi2({7, 8, 9, 10, 11, 12}, testBssid);
   FakeUpdateContext update2("sketch1", 789101);
   LazyMeshOta lmo2;
-  lmo2.begin("noTransferTest", 1, testBssid);
+  lmo2.begin("noTransferTest", 1);
 
   uint32_t start = millis();
   for (;;) {
@@ -65,15 +65,15 @@ test(noTransferTest) {
 }
 
 test(transferTest) {
-  FakeWifiContext wifi1({1, 2, 3, 4, 5, 6});
+  FakeWifiContext wifi1({1, 2, 3, 4, 5, 6}, testBssid);
   FakeUpdateContext update1("sketch1", 12345);
   LazyMeshOta lmo1;
-  lmo1.begin("transferTest", 2, testBssid);
+  lmo1.begin("transferTest", 2);
 
-  FakeWifiContext wifi2({7, 8, 9, 10, 11, 12});
+  FakeWifiContext wifi2({7, 8, 9, 10, 11, 12}, testBssid);
   FakeUpdateContext update2("sketch1", 789101);
   LazyMeshOta lmo2;
-  lmo2.begin("transferTest", 1, testBssid);
+  lmo2.begin("transferTest", 1);
 
   uint32_t start = millis();
   for (;;) {
@@ -96,15 +96,15 @@ test(transferTest) {
 }
 
 test(retryTest) {
-  FakeWifiContext wifi1({1, 2, 3, 4, 5, 6});
+  FakeWifiContext wifi1({1, 2, 3, 4, 5, 6}, testBssid);
   FakeUpdateContext update1("sketch1datadatadata", 12345);
   LazyMeshOta lmo1;
-  lmo1.begin("transferTest", 2, testBssid);
+  lmo1.begin("transferTest", 2);
 
-  FakeWifiContext wifi2({7, 8, 9, 10, 11, 12});
+  FakeWifiContext wifi2({7, 8, 9, 10, 11, 12}, testBssid);
   FakeUpdateContext update2("sketch2datadatadata", 789101);
   LazyMeshOta lmo2;
-  lmo2.begin("transferTest", 1, testBssid);
+  lmo2.begin("transferTest", 1);
 
   uint32_t start = millis();
   size_t pktCount = 0;
