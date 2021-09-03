@@ -28,9 +28,7 @@ static uint32_t getChipId() { return ESP.getChipId(); }
 
 static bool concatString(String* str, char* buf, size_t len) { return str->concat(buf, len); }
 
-static void espRestart() {
-  ESP.restart();
-}
+static void espRestart() { ESP.restart(); }
 
 #else
 
@@ -183,6 +181,11 @@ void LazyMeshOta::begin(String sketchName, int version) {
 
   // Don't have everything advertise all at once.
   _nextAdvertise = millis() + (getChipId() % advertiseInterval);
+
+#if !defined(EPOXY_DUINO)
+  // Keep running loop() forever.
+  schedule_recurrent_function_us([this]() -> bool { loop(); return true; }, 100000);
+#endif
 }
 
 void LazyMeshOta::end() {
@@ -199,9 +202,9 @@ void LazyMeshOta::end() {
 
 void LazyMeshOta::loop() {
   if (_updateSucceeded) {
-  if (tracePackets) {
-    Serial.print("&");
-  }
+    if (tracePackets) {
+      Serial.print("&");
+    }
     return;
   }
   if (tracePackets) {
@@ -519,7 +522,7 @@ void LazyMeshOta::_receiveTimeout() {
     _update = nullptr;
 
     if (tracePackets) {
-    Serial.println("Update exceeded max retries");
+      Serial.println("Update exceeded max retries");
     }
     return;
   }

@@ -18,6 +18,7 @@
 #include <user_interface.h>
 #include <wifi_raw.h>  // https://github.com/shkoo/esp8266_wifi_raw
 #define NON_EPOXY_OVERRIDE override
+#include <Schedule.h>
 #endif
 
 // LazyMeshOta propagates a new version of firmware automatically when
