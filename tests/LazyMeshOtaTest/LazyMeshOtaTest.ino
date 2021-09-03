@@ -60,8 +60,10 @@ test(noTransferTest) {
   }
   assertFalse(update1.didBegin);
   assertFalse(update1.didUpdate);
+  assertFalse(update1.didRestart);
   assertFalse(update2.didBegin);
   assertFalse(update2.didUpdate);
+  assertFalse(update2.didRestart);
 }
 
 test(transferTest) {
@@ -91,8 +93,10 @@ test(transferTest) {
   }
   assertFalse(update1.didBegin);
   assertFalse(update1.didUpdate);
+  assertFalse(update1.didRestart);
   assertTrue(update2.didBegin);
   assertTrue(update2.didUpdate);
+  assertTrue(update2.didRestart);
 }
 
 test(retryTest) {
@@ -130,8 +134,10 @@ test(retryTest) {
   }
   assertFalse(update1.didBegin);
   assertFalse(update1.didUpdate);
+  assertFalse(update1.didRestart);
   assertTrue(update2.didBegin);
   assertTrue(update2.didUpdate);
+  assertTrue(update2.didRestart);
 }
 
 void setup() {

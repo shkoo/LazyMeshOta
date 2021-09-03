@@ -11,7 +11,7 @@ struct eth_addr {
 
 #define WL_MAC_ADDR_LENGTH 6
 
-// raw wifi stubrs
+// raw wifi stubs
 struct RxControl {
   int8_t rssi;
   unsigned legacy_length : 12;
@@ -75,5 +75,8 @@ static inline void wifi_station_get_config(station_config* sc) {
   assert(FakeWifiContext::curContext);
   memcpy(sc->bssid, &FakeWifiContext::curContext->bssid, sizeof(sc->bssid));
 }
+
+// No need for interrupt stuff to be in the IRAM when testing.
+#define IRAM_ATTR
 
 #endif

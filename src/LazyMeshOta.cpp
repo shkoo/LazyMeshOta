@@ -28,6 +28,10 @@ static uint32_t getChipId() { return ESP.getChipId(); }
 
 static bool concatString(String* str, char* buf, size_t len) { return str->concat(buf, len); }
 
+static void espRestart() {
+  ESP.restart();
+}
+
 #else
 
 // Epoxy duino doesn't allow us to concatinate more than one character at once.
@@ -178,7 +182,7 @@ void LazyMeshOta::begin(String sketchName, int version) {
   assert(wifi_get_macaddr(0, _localEthAddr.addr));
 
   // Don't have everything advertise all at once.
-  _nextAdvertise = getChipId() % advertiseInterval;
+  _nextAdvertise = millis() + (getChipId() % advertiseInterval);
 }
 
 void LazyMeshOta::end() {
@@ -195,7 +199,13 @@ void LazyMeshOta::end() {
 
 void LazyMeshOta::loop() {
   if (_updateSucceeded) {
+  if (tracePackets) {
+    Serial.print("&");
+  }
     return;
+  }
+  if (tracePackets) {
+    Serial.print("*");
   }
   uint32_t cur = millis();
 
@@ -231,6 +241,10 @@ void LazyMeshOta::loop() {
 }
 
 void LazyMeshOta::_advertise() {
+  if (_update) {
+    // Don't advertise our version if we think it might be old.
+    return;
+  }
   if (tracePackets) {
     Serial.println("Advertising local version " + String(_localVersion) +
                    " md5=" + _localSketchMd5);
@@ -242,7 +256,7 @@ void LazyMeshOta::_advertise() {
 
 void LazyMeshOta::_transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, String msg) {
   uint32_t tot_len = sizeof(hdr_t) + msg.length();
-  uint8_t buf[tot_len];
+  assert(tot_len < sizeof(_transmitBuf));
   hdr_t hdr;
 
   hdr.duration = 0;
@@ -254,15 +268,15 @@ void LazyMeshOta::_transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, St
   hdr.seq = ++curSeq;
   hdr.len = msg.length();
 
-  memcpy(buf, &hdr, sizeof(hdr));
-  memcpy(buf + sizeof(hdr), msg.c_str(), msg.length());
+  memcpy(_transmitBuf, &hdr, sizeof(hdr));
+  memcpy(_transmitBuf + sizeof(hdr), msg.c_str(), msg.length());
 
-  int freedom_result = wifi_send_pkt_freedom(buf, tot_len, true);
+  int freedom_result = wifi_send_pkt_freedom(_transmitBuf, tot_len, true);
 
   if (tracePackets) {
     Serial.print("SENT packet with result " + String(freedom_result) + " errno " + String(errno) +
                  ":\n");
-    _tracePacket(buf, tot_len, 0 /* 802.11 header starts at 0 */);
+    _tracePacket(_transmitBuf, tot_len, 0 /* 802.11 header starts at 0 */);
   }
 }
 
@@ -271,14 +285,25 @@ void LazyMeshOta::onReceiveRawFrameCallback(RxPacket* pkt) {
   _instance->onReceiveRawFrame(pkt);
 }
 
+eth_addr LazyMeshOta::_getLocalBssid() {
+  eth_addr bssid;
+  station_config sc;
+  wifi_station_get_config(&sc);
+  memcpy(&bssid, sc.bssid, sizeof(bssid));
+  return bssid;
+}
+
 void LazyMeshOta::onReceiveRawFrame(RxPacket* pkt) {
+  if (_receivedPacket) {
+    return;
+  }
   uint8_t* frm = pkt->data;
-  uint16_t len = pkt->rx_ctl.legacy_length;
+  uint32_t tot_len = pkt->rx_ctl.legacy_length;
   if (tracePackets) {
-    Serial.printf(".%d", len);
+    Serial.printf(".%d", tot_len);
   }
   // Quick check to filter out any bssids that don't pertain to LazyMeshOta.
-  if (len < sizeof(hdr_t)) {
+  if (tot_len < sizeof(hdr_t)) {
     // Packet too short.
     return;
   }
@@ -299,31 +324,12 @@ void LazyMeshOta::onReceiveRawFrame(RxPacket* pkt) {
     return;
   }
 
-  _receive(frm, len);
-}
-
-eth_addr LazyMeshOta::_getLocalBssid() {
-  eth_addr bssid;
-  station_config sc;
-  wifi_station_get_config(&sc);
-  memcpy(&bssid, sc.bssid, sizeof(bssid));
-  return bssid;
-}
-
-void LazyMeshOta::_receive(uint8_t* frm, uint16_t tot_len) {
-  hdr_t* hdr = reinterpret_cast<hdr_t*>(frm);
-  if (hdr->dsap != hdr_t().dsap) {
-    if (tracePackets) {
-      Serial.printf("dsap(%02x)", hdr->dsap);
-    }
-    return;
-  }
-
   if (memcmp(&hdr->src, &_localEthAddr, sizeof(_localEthAddr)) == 0) {
     // We sent this packet
     if (tracePackets) {
       Serial.print("Received a packet we sent\n");
     }
+    return;
   }
 
   if (tracePackets) {
@@ -469,8 +475,9 @@ void LazyMeshOta::_startUpdate(const eth_addr& src, const eth_addr& bssid, int v
   _update->size = sketchsize;
   _update->bssid = bssid;
 
-  Update.setMD5(md5sum.c_str());
   Update.begin(sketchsize);
+  Update.runAsync(true);
+  Update.setMD5(md5sum.c_str());
 
   _requestNextBlock();
 }
@@ -487,10 +494,11 @@ void LazyMeshOta::_requestNextBlock() {
     if (!Update.end()) {
       Serial.println("Update error:");
       Update.printError(Serial);
+    } else {
+      Serial.println("Update succeded; restarting");
+      _updateSucceeded = true;
+      espRestart();
     }
-
-    _updateSucceeded = true;
-
     delete _update;
     _update = nullptr;
     return;
@@ -510,7 +518,9 @@ void LazyMeshOta::_receiveTimeout() {
     delete _update;
     _update = nullptr;
 
+    if (tracePackets) {
     Serial.println("Update exceeded max retries");
+    }
     return;
   }
 
@@ -609,6 +619,7 @@ void LazyMeshOta::_receiveReply(const eth_addr& /* src */, BufStream& body) {
     return;
   }
 
+  body.align();
   uint32_t writelen = Update.write((uint8_t*)body.peekBuffer(), size);
   if (writelen != size) {
     if (tracePackets) {
@@ -621,22 +632,6 @@ void LazyMeshOta::_receiveReply(const eth_addr& /* src */, BufStream& body) {
     Serial.printf("Sent %u bytes to updater at offset %u\n", writelen, startOffset);
   }
   _update->offset += writelen;
+  _update->retryCount = 0;
   _requestNextBlock();
 }
-
-/*
-LazyMeshOta::receiveRawCallback(uint8_t* frm, int16_t len) {
-
-// Size and md5:
-ESP.getSketchSize()
-ESP.getSketchMd5()
-
-// Flash start in RAM, per https://github.com/esp8266/esp8266-wiki/wiki/Memory-Map:
-
-0x40200000h
-
-// Start of first sketch:
-#include <spi_flash_geometry.h>
-APP_START_OFFSET
-
-*/

@@ -6,6 +6,7 @@
 #include <assert.h>
 
 #include <algorithm>
+#include <atomic>
 #if defined(EPOXY_DUINO)
 #include "fake_update.h"
 #include "fake_wifi.h"
@@ -51,8 +52,8 @@ class LazyMeshOta {
     _instance = this;
     wifi_raw_set_recv_cb(onReceiveRawFrameCallback);
   }
-  void onReceiveRawFrame(RxPacket*);
-  static void onReceiveRawFrameCallback(RxPacket*);
+  void onReceiveRawFrame(RxPacket*) IRAM_ATTR;
+  static void onReceiveRawFrameCallback(RxPacket*) IRAM_ATTR;
 
   // Call this in loop()
   void loop();
@@ -94,11 +95,18 @@ class LazyMeshOta {
   class BufStream : public Stream {
    public:
     static constexpr uint32_t bufStreamSize = 2048;
+    void align() {
+      assert(_len >= _pos);
+      _len -= _pos;
+      memmove(_buf, _buf + _pos, _len);
+      _pos = 0;
+    }
     void reset(uint8_t* buf, uint32_t len) {
       assert(len <= bufStreamSize);
       memcpy(_buf, buf, len);
       _pos = 0;
       _len = len;
+      _buf[bufStreamSize] = 0;
     }
     int available() override {
       assert(_len >= _pos);
@@ -132,7 +140,10 @@ class LazyMeshOta {
       return _len - _pos;
     }
 
-    const char* peekBuffer() NON_EPOXY_OVERRIDE { return _buf + _pos; }
+    const char* peekBuffer() NON_EPOXY_OVERRIDE {
+      assert(_len >= _pos);
+      return _buf + _pos;
+    }
 
     void peekConsume(size_t consume) NON_EPOXY_OVERRIDE {
       assert(_len >= _pos);
@@ -144,19 +155,20 @@ class LazyMeshOta {
     virtual size_t write(uint8_t) override { return 0; }
 
    private:
-    char _buf[bufStreamSize];
+    char _buf[bufStreamSize + 1];
     uint32_t _pos = 0;
     uint32_t _len = 0;
   };
 
   //  static constexpr uint32_t advertiseInterval = 60000; // Advertise our version every 60
   //  seconds.
-  static constexpr uint32_t advertiseInterval = 5000;
 
 #if defined(EPOXY_DUINO)
-  static constexpr uint32_t receiveTimeoutInterval = 500;
+  static constexpr uint32_t advertiseInterval = 1000;
+  static constexpr uint32_t receiveTimeoutInterval = 456;
   static constexpr uint16_t bufferSize = 4;  // Number of bytes to transfer per packet.
 #else
+  static constexpr uint32_t advertiseInterval = 30000;
   static constexpr uint32_t receiveTimeoutInterval = 1000;  // Time out receive after 1000ms.
   static constexpr uint16_t bufferSize = 1024;              // Number of bytes to transfer per packet.
 #endif
@@ -165,8 +177,6 @@ class LazyMeshOta {
   eth_addr _getLocalBssid();
 
   void _transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, String msg);
-  void _receive(uint8_t* frm, uint16_t len);
-
   void _tracePacket(uint8_t* pkt, uint32_t len, uint32_t hdr_start);
 
   void _advertise();
@@ -186,7 +196,7 @@ class LazyMeshOta {
   uint16_t _retryCount = 0;
 
   // Received packet we're waiting to process when wifi isn't waiting for us.
-  volatile bool _receivedPacket = false;
+  bool _receivedPacket = false;
   PKT_TYPE _receivedPacketType;
   eth_addr _receivedSrc;
   BufStream _receivedBody;
@@ -204,8 +214,10 @@ class LazyMeshOta {
   // True if an update is complete; we then just wait for reboot.
   bool _updateSucceeded = false;
 
+  alignas(long) uint8_t _transmitBuf[1500];
+
   // For the register_wifi_cb convenience method
-  static LazyMeshOta* _instance;
+  static IRAM_ATTR LazyMeshOta* _instance;
 };
 
 #endif

@@ -20,6 +20,7 @@ class FakeUpdateContext {
   // Set to true if an update was successful.
   bool didUpdate = false;
   bool didBegin = false;
+  bool didRestart = false;
 
   bool begin(size_t size) {
     assert(!_inProgress);
@@ -93,6 +94,8 @@ class FakeUpdateContext {
   }
   uint32_t getLocalChipId() { return _chipId; }
 
+  void espRestart() { didRestart = true; }
+
   static FakeUpdateContext *curContext;
 
  private:
@@ -115,6 +118,7 @@ class FakeUpdateForwarder {
   void printError(Print &out) { instance()->printError(out); }
   size_t write(uint8_t *data, size_t len) { return instance()->write(data, len); }
   bool end() { return instance()->end(); }
+  void runAsync(bool) {}
 };
 
 extern FakeUpdateForwarder Update;
@@ -135,6 +139,10 @@ static inline bool flashRead(uint32_t address, uint8_t *data, size_t size) {
 static inline uint32_t getChipId() {
   assert(FakeUpdateContext::curContext);
   return FakeUpdateContext::curContext->getLocalChipId();
+}
+static inline void espRestart() {
+  assert(FakeUpdateContext::curContext);
+  return FakeUpdateContext::curContext->espRestart();
 }
 
 #endif
