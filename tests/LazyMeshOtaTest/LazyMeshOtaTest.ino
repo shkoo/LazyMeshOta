@@ -21,13 +21,15 @@ void runSome(LazyMeshOta& ota, FakeWifiContext& wifiCtx, FakeUpdateContext& upda
   wifiCtx.enable();
   updateCtx.enable();
   if (FakeWifiContext::rawWifiPacket) {
-    ota.onReceiveRawFrame(FakeWifiContext::rawWifiPacket);
-    FakeWifiContext::discardRawWifiPacket();
+    RxPacket* pkt = FakeWifiContext::rawWifiPacket;
+    FakeWifiContext::rawWifiPacket = nullptr;
+    ota.onReceiveRawFrame(pkt);
   }
   ota.loop();
 }
 
 test(simpleTest) {
+  FakeUpdateContext update1("sketch1", 12345);
   LazyMeshOta lmo;
   lmo.begin("LazyMeshOtaTest", 1);
   lmo.end();

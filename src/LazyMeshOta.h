@@ -38,31 +38,48 @@
 
 class LazyMeshOta {
  public:
-  // 'version' is the version number of the current software.  Any
-  // peer nodes with lower version numbers will be upgraded.
-  //
-  // bssid should be unique for this sketch, otherwise we could try to
-  // upgrade to a different sketch.
+  class Listener {
+   public:
+    virtual void onNeighborSeen(eth_addr src, String sketchName, int version, String md5);
+    virtual void onStartUpgrade(eth_addr src, int version, String md5);
+    virtual void onDoneUpgrade();
+
+    virtual void onSendProgress(eth_addr src, size_t start, size_t len, size_t tot_size);
+    virtual void onRequestChunk(size_t start, size_t tot_size);
+    virtual void onReceiveTimeout();
+    virtual void onError(String err);
+  };
+
   LazyMeshOta() = default;
   ~LazyMeshOta() { end(); }
 
+  // 'version' is the version number of the current software.  Any
+  // peer nodes with lower version numbers and the same sketchName
+  // will be upgraded.
   void begin(String sketchName, int version);
+
+  void setListener(Listener* l) { _listener = l; }
+
   void end();
   void register_wifi_cb() {
     assert(!_instance);
     _instance = this;
     wifi_raw_set_recv_cb(onReceiveRawFrameCallback);
   }
-  void onReceiveRawFrame(RxPacket*) IRAM_ATTR;
+  // Receives a raw frame directly from the network stack, likely in an interrupt context.
   static void onReceiveRawFrameCallback(RxPacket*) IRAM_ATTR;
 
-  // Call this in loop()
-  void loop();
+  // Receives a raw frame.  Must free frame when done.
+  bool onReceiveRawFrame(RxPacket* pkt);
 
   // Convert ethernet address to string.
   static String ethToString(const eth_addr& addr);
   // Convert string to ethernet address.  Return true on success.
   static bool ethFromString(eth_addr* out, String src);
+
+#if defined(EPOXY_DUINO)
+  void loop() { _loop(); }
+#endif
 
  private:
   enum class PKT_TYPE : uint8_t {
@@ -95,20 +112,7 @@ class LazyMeshOta {
   };
   class BufStream : public Stream {
    public:
-    static constexpr uint32_t bufStreamSize = 2048;
-    void align() {
-      assert(_len >= _pos);
-      _len -= _pos;
-      memmove(_buf, _buf + _pos, _len);
-      _pos = 0;
-    }
-    void reset(uint8_t* buf, uint32_t len) {
-      assert(len <= bufStreamSize);
-      memcpy(_buf, buf, len);
-      _pos = 0;
-      _len = len;
-      _buf[bufStreamSize] = 0;
-    }
+    BufStream(char* buf, size_t len) : _buf(buf), _len(len) {}
     int available() override {
       assert(_len >= _pos);
       return _len - _pos;
@@ -122,7 +126,7 @@ class LazyMeshOta {
     }
     int read(uint8_t* buffer, size_t len) NON_EPOXY_OVERRIDE {
       assert(_len >= _pos);
-      uint32_t actual = std::min<size_t>(len, _len - _pos);
+      size_t actual = std::min<size_t>(len, _len - _pos);
       memcpy(buffer, _buf + _pos, actual);
       return actual;
     }
@@ -156,9 +160,9 @@ class LazyMeshOta {
     virtual size_t write(uint8_t) override { return 0; }
 
    private:
-    char _buf[bufStreamSize + 1];
-    uint32_t _pos = 0;
-    uint32_t _len = 0;
+    char* _buf = nullptr;
+    size_t _pos = 0;
+    size_t _len = 0;
   };
 
   //  static constexpr uint32_t advertiseInterval = 60000; // Advertise our version every 60
@@ -170,12 +174,15 @@ class LazyMeshOta {
   static constexpr uint16_t bufferSize = 4;  // Number of bytes to transfer per packet.
 #else
   static constexpr uint32_t advertiseInterval = 30000;
-  static constexpr uint32_t receiveTimeoutInterval = 1000;  // Time out receive after 1000ms.
-  static constexpr uint16_t bufferSize = 1024;              // Number of bytes to transfer per packet.
+  static constexpr uint32_t receiveTimeoutInterval = 10000;
+  static constexpr uint16_t bufferSize = 1024;  // Number of bytes to transfer per packet.
 #endif
   static constexpr uint16_t maxRetries = 10;  // Number of times to try a block before giving up.
 
   eth_addr _getLocalBssid();
+
+  // Runs once per loop.  Checks to see if we need to advertise and/or resend lost packets.
+  void _loop();
 
   void _transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, String msg);
   void _tracePacket(uint8_t* pkt, uint32_t len, uint32_t hdr_start);
@@ -189,18 +196,14 @@ class LazyMeshOta {
   void _receiveReq(const eth_addr& src, BufStream& body);
   void _receiveReply(const eth_addr& src, BufStream& body);
 
+  Listener _defaultListener;
+  Listener* _listener = &_defaultListener;
   // timestamp in millis of next version advertisement
   uint32_t _nextAdvertise = 0;
 
   // timestamp in millis of next receive timeout, if update is in progress.
   uint32_t _nextReceiveTimeout = 0;
   uint16_t _retryCount = 0;
-
-  // Received packet we're waiting to process when wifi isn't waiting for us.
-  bool _receivedPacket = false;
-  PKT_TYPE _receivedPacketType;
-  eth_addr _receivedSrc;
-  BufStream _receivedBody;
 
   // Version of our current sketch.
   String _localSketchName;
@@ -213,12 +216,10 @@ class LazyMeshOta {
   update_t* _update = nullptr;
 
   // True if an update is complete; we then just wait for reboot.
-  bool _updateSucceeded = false;
-
-  alignas(long) uint8_t _transmitBuf[1500];
+  bool _terminate = false;
 
   // For the register_wifi_cb convenience method
-  static IRAM_ATTR LazyMeshOta* _instance;
+  static LazyMeshOta* _instance;
 };
 
 #endif

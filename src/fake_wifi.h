@@ -56,12 +56,12 @@ static inline bool wifi_get_macaddr(uint8_t /* if_index */, uint8_t* macaddr) {
   memcpy(macaddr, &FakeWifiContext::curContext->macaddr, 6);
   return true;
 }
-static inline int wifi_send_pkt_freedom(uint8_t* buf, int len, bool /* sys_seq */) {
-  auto& rawWifiPacket = FakeWifiContext::rawWifiPacket;
-
+static inline int wifi_send_raw_packet(void* buf, int len) {
   FakeWifiContext::discardRawWifiPacket();
+  auto& rawWifiPacket = FakeWifiContext::rawWifiPacket;
   rawWifiPacket = (RxPacket*)malloc(sizeof(RxControl) + len);
   memcpy(rawWifiPacket->data, buf, len);
+  free(buf);
   rawWifiPacket->rx_ctl.rssi = 1;
   rawWifiPacket->rx_ctl.legacy_length = len;
   return len;

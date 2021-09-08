@@ -2,6 +2,20 @@
 #include <stdio.h>
 
 #include <cerrno>
+#include <functional>
+#if !defined(EPOXY_DUINO)
+#include <Schedule.h>
+#else
+static void schedule_function(const std::function<void(void)>& f) {
+  // For testing, just do it now instead of waiting for later.
+  f();
+}
+static void schedule_recurrent_function_us(const std::function<bool(void)>& f, uint32_t) {
+  // For testing, just do it now instead of waiting for later.
+  f();
+}
+
+#endif
 
 constexpr uint32_t LazyMeshOta::advertiseInterval;
 constexpr uint32_t LazyMeshOta::receiveTimeoutInterval;
@@ -9,10 +23,17 @@ constexpr uint16_t LazyMeshOta::bufferSize;
 constexpr uint16_t LazyMeshOta::maxRetries;
 
 static constexpr eth_addr ethBroadcast = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-// 0 = no trace, 1 = trace some, 3 = verbose trace
+// 0 = no trace, 1 = single chars, 2 = trace some, 3 = verbose trace
 static constexpr int tracePackets = 0;
 
 LazyMeshOta* LazyMeshOta::_instance = nullptr;
+
+static void debugPutchar(int ch) {
+  // Can't run this in the recurrent function, so schedule it for later.
+  if (tracePackets) {
+    schedule_function([ch]() { putchar(ch); });
+  }
+}
 
 #if !defined(EPOXY_DUINO)
 // If not testing, run real versions of these functions from the ESP core.
@@ -135,7 +156,7 @@ void LazyMeshOta::_tracePacket(uint8_t* pkt, uint32_t len, uint32_t hdr_start) {
                    " BSSID: " + ethToString(hdr->bssid) +
                    " PktType: " + String(int(hdr->packetType)));
   }
-  if (tracePackets > 2) {
+  if (tracePackets > 3) {
     for (uint32_t i = 0; i != len; ++i) {
       if ((i & 7) == 0) {
         Serial.printf("\n@%d: ", i);
@@ -180,11 +201,11 @@ void LazyMeshOta::begin(String sketchName, int version) {
   assert(wifi_get_macaddr(0, _localEthAddr.addr));
 
   // Don't have everything advertise all at once.
-  _nextAdvertise = millis() + (getChipId() % advertiseInterval);
+  _nextAdvertise = millis() + random(advertiseInterval * 2 / 2, advertiseInterval * 3 / 2);
 
 #if !defined(EPOXY_DUINO)
   // Keep running loop() forever.
-  schedule_recurrent_function_us([this]() -> bool { loop(); return true; }, 100000);
+  schedule_function(std::bind(&LazyMeshOta::_loop, this));
 #endif
 }
 
@@ -195,50 +216,33 @@ void LazyMeshOta::end() {
     _update = nullptr;
   }
   if (_instance == this) {
-    _instance = nullptr;
     wifi_raw_set_recv_cb(nullptr);
+    _instance = nullptr;
   }
+  _terminate = true;
 }
 
-void LazyMeshOta::loop() {
-  if (_updateSucceeded) {
-    if (tracePackets) {
+void LazyMeshOta::_loop() {
+  if (_terminate) {
+    if (tracePackets > 1) {
       Serial.print("&");
     }
     return;
   }
-  if (tracePackets) {
+#if !defined(EPOXY_DUINO)
+  schedule_function(std::bind(&LazyMeshOta::_loop, this));
+#endif
+  if (tracePackets > 1) {
     Serial.print("*");
   }
   uint32_t cur = millis();
 
   if (int32_t(cur - _nextAdvertise) > 0) {
     _advertise();
-    _nextAdvertise = cur + advertiseInterval;
+    _nextAdvertise = millis() + random(advertiseInterval * 2 / 2, advertiseInterval * 3 / 2);
   }
 
-  if (_receivedPacket) {
-    if (tracePackets) {
-      Serial.print("Processing received packet\n");
-    }
-    switch (_receivedPacketType) {
-      case PKT_TYPE::ADVERTISE:
-        _receiveAdvertise(_receivedSrc, _receivedBody);
-        break;
-      case PKT_TYPE::REQ:
-        _receiveReq(_receivedSrc, _receivedBody);
-        break;
-      case PKT_TYPE::REPLY:
-        _receiveReply(_receivedSrc, _receivedBody);
-        break;
-      default:
-        if (tracePackets) {
-          Serial.printf("Unknown packet type %d\n", int(_receivedPacketType));
-        }
-        break;
-    }
-    _receivedPacket = false;
-  } else if (_update && int32_t(cur - _nextReceiveTimeout) > 0) {
+  if (_update && int32_t(cur - _nextReceiveTimeout) > 0) {
     _receiveTimeout();
   }
 }
@@ -248,10 +252,11 @@ void LazyMeshOta::_advertise() {
     // Don't advertise our version if we think it might be old.
     return;
   }
-  if (tracePackets) {
+  if (tracePackets > 1) {
     Serial.println("Advertising local version " + String(_localVersion) +
                    " md5=" + _localSketchMd5);
   }
+  debugPutchar('A');
   _transmit(PKT_TYPE::ADVERTISE, ethBroadcast, ethBroadcast /* bssid */,
             _localSketchName + "\n" + String(_localVersion) + "\n" + String(_localSketchSize) +
                 "\n" + _localSketchMd5 + "\n" + ethToString(_getLocalBssid()) + "\n");
@@ -259,7 +264,14 @@ void LazyMeshOta::_advertise() {
 
 void LazyMeshOta::_transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, String msg) {
   uint32_t tot_len = sizeof(hdr_t) + msg.length();
-  assert(tot_len < sizeof(_transmitBuf));
+  uint8_t* transmitBuf = (uint8_t*)malloc(tot_len);
+
+  if (!transmitBuf) {
+    if (tracePackets > 1) {
+      Serial.println("Unable to allocate transmitBuf");
+    }
+    return;
+  }
   hdr_t hdr;
 
   hdr.duration = 0;
@@ -271,21 +283,65 @@ void LazyMeshOta::_transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, St
   hdr.seq = ++curSeq;
   hdr.len = msg.length();
 
-  memcpy(_transmitBuf, &hdr, sizeof(hdr));
-  memcpy(_transmitBuf + sizeof(hdr), msg.c_str(), msg.length());
+  memcpy(transmitBuf, &hdr, sizeof(hdr));
+  memcpy(transmitBuf + sizeof(hdr), msg.c_str(), msg.length());
 
-  int freedom_result = wifi_send_pkt_freedom(_transmitBuf, tot_len, true);
+  if (tracePackets > 1) {
+    Serial.println("Sending:");
+    _tracePacket(transmitBuf, tot_len, 0 /* 802.11 header starts at 0 */);
+  }
+  int res = wifi_send_raw_packet(transmitBuf, tot_len);
+  if (res < 0) {
+    schedule_function(std::bind(&Listener::onError, _listener, "WiFi raw send failed"));
+    free(transmitBuf);
+    return;
+  }
 
-  if (tracePackets) {
-    Serial.print("SENT packet with result " + String(freedom_result) + " errno " + String(errno) +
-                 ":\n");
-    _tracePacket(_transmitBuf, tot_len, 0 /* 802.11 header starts at 0 */);
+  if (tracePackets > 1) {
+    Serial.print("SENT packet with result " + String(res) + " errno " + String(errno) + "\n");
   }
 }
 
 void LazyMeshOta::onReceiveRawFrameCallback(RxPacket* pkt) {
-  assert(_instance);
-  _instance->onReceiveRawFrame(pkt);
+  hdr_t* hdr = reinterpret_cast<hdr_t*>(pkt->data);
+  if (hdr->dsap != hdr_t().dsap) {
+    // Different protocol than ours; skip.
+    if (tracePackets > 1) {
+      Serial.printf("dsap(%02x)", hdr->dsap);
+    }
+    return;
+  }
+
+  if (!_instance) {
+    if (tracePackets > 1) {
+      Serial.println("no instance");
+    }
+    return;
+  }
+
+  static uint16_t lastSeq = 0;
+  if (lastSeq == hdr->seq) {
+    // Sometimes we get duplicate packets received?  Not sure why!
+    debugPutchar('@');
+    return;
+  }
+  lastSeq = hdr->seq;
+
+  // Copy the packet away from the network stack so we'll have it later.
+  uint32_t totLen = sizeof(RxControl) + pkt->rx_ctl.legacy_length;
+  RxPacket* pktCopy = (RxPacket*)malloc(totLen);
+  if (!pktCopy) {
+    // Out of memory; skip
+    if (tracePackets > 1) {
+      Serial.println("OOM receive packet");
+    }
+    schedule_function(std::bind(&Listener::onError, _instance->_listener, "OOM receiving packet"));
+    return;
+  }
+  memcpy(pktCopy, pkt, totLen);
+
+  schedule_recurrent_function_us(std::bind(&LazyMeshOta::onReceiveRawFrame, _instance, pktCopy), 0);
+  return;
 }
 
 eth_addr LazyMeshOta::_getLocalBssid() {
@@ -296,69 +352,70 @@ eth_addr LazyMeshOta::_getLocalBssid() {
   return bssid;
 }
 
-void LazyMeshOta::onReceiveRawFrame(RxPacket* pkt) {
-  if (_receivedPacket) {
-    return;
-  }
+bool LazyMeshOta::onReceiveRawFrame(RxPacket* pkt) {
   uint8_t* frm = pkt->data;
   uint32_t tot_len = pkt->rx_ctl.legacy_length;
-  if (tracePackets) {
-    Serial.printf(".%d", tot_len);
+  if (tracePackets || true) {
+    debugPutchar('X');
+  }
+  if (tracePackets > 2) {
+    Serial.printf("\nReceived packet:\n");
+    _tracePacket(frm, tot_len, 0);
   }
   // Quick check to filter out any bssids that don't pertain to LazyMeshOta.
   if (tot_len < sizeof(hdr_t)) {
     // Packet too short.
-    return;
+    free(pkt);
+    return false;
   }
   hdr_t* hdr = reinterpret_cast<hdr_t*>(frm);
-  if (hdr->dsap != hdr_t().dsap) {
+  if (hdr->dsap != hdr_t().dsap || hdr->ssap != hdr_t().ssap) {
     // Different protocol than ours; skip.
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("dsap(%02x)", hdr->dsap);
     }
-    return;
+    free(pkt);
+    return false;
   }
   if (memcmp(&hdr->dest, &_localEthAddr, sizeof(_localEthAddr)) != 0 &&
       memcmp(&hdr->dest, &ethBroadcast, sizeof(ethBroadcast))) {
     // Not to us.
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.println("Received packet to wrong target " + ethToString(hdr->dest));
     }
-    return;
+    free(pkt);
+    return false;
   }
 
   if (memcmp(&hdr->src, &_localEthAddr, sizeof(_localEthAddr)) == 0) {
     // We sent this packet
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.print("Received a packet we sent\n");
     }
-    return;
+    free(pkt);
+    return false;
   }
 
-  if (tracePackets) {
+  if (tracePackets > 1) {
     Serial.printf("\nReceived packet:\n");
     _tracePacket(frm, tot_len, 0);
   }
 
-  if (_receivedPacket) {
-    if (tracePackets) {
-      Serial.printf("Already waiting on packet to process; discarding\n");
-    }
-    return;
-  }
-
   if (tot_len <= sizeof(hdr_t)) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Packet too short; tot_len %d <= %d\n", tot_len, sizeof(hdr_t));
     }
-    return;
+    free(pkt);
+    return false;
   }
   if (hdr->ssap != hdr_t().ssap) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Wrong ssap %02x\n", hdr->ssap);
     }
-    return;
+    free(pkt);
+    return false;
   }
+
   uint16_t pdu_len = tot_len - sizeof(hdr_t);
 
   // Don't need the whole header, so just copy out what we care about.
@@ -366,41 +423,55 @@ void LazyMeshOta::onReceiveRawFrame(RxPacket* pkt) {
   memcpy(&hdr_len, frm + offsetof(hdr_t, len), sizeof(hdr_len));
 
   if (hdr_len > pdu_len) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Packet length mismatch; packet has pdu length %d but says it has length %d\n",
                     pdu_len, hdr_len);
     }
-    return;
+    free(pkt);
+    return false;
   }
 
-  memcpy(&_receivedPacketType, frm + offsetof(hdr_t, packetType), sizeof(_receivedPacketType));
-  memcpy(&_receivedSrc, frm + offsetof(hdr_t, src), sizeof(_receivedSrc));
-  _receivedBody.reset(frm + sizeof(hdr_t), hdr_len);
-  if (tracePackets) {
-    String ethstr = ethToString(_receivedSrc);
-    Serial.printf("Got of type %d from %s len %u\n", int(_receivedPacketType), ethstr.c_str(),
-                  _receivedBody.peekAvailable());
+  PKT_TYPE receivedPacketType;
+  memcpy(&receivedPacketType, frm + offsetof(hdr_t, packetType), sizeof(receivedPacketType));
+  eth_addr receivedSrc;
+  memcpy(&receivedSrc, frm + offsetof(hdr_t, src), sizeof(receivedSrc));
+  BufStream receivedBody((char*)frm + sizeof(hdr_t), hdr_len);
+  if (tracePackets > 1) {
+    String ethstr = ethToString(receivedSrc);
+    Serial.printf("Got of type %d from %s len %u\n", int(receivedPacketType), ethstr.c_str(),
+                  receivedBody.peekAvailable());
   }
-  _receivedPacket = true;
+  switch (receivedPacketType) {
+    case PKT_TYPE::ADVERTISE:
+      _receiveAdvertise(receivedSrc, receivedBody);
+      break;
+    case PKT_TYPE::REQ:
+      _receiveReq(receivedSrc, receivedBody);
+      break;
+    case PKT_TYPE::REPLY:
+      _receiveReply(receivedSrc, receivedBody);
+      break;
+    default:
+      if (tracePackets > 1) {
+        Serial.printf("Unknown packet type %d\n", int(receivedPacketType));
+      }
+      break;
+  }
+  free(pkt);
+  return false;
 }
 
 void LazyMeshOta::_receiveAdvertise(const eth_addr& src, BufStream& body) {
   // <version>\n<sketchsize>\n<md5sum>\n
-  if (tracePackets) {
+  if (tracePackets > 1) {
     Serial.printf("Advertisement received '%s'\n", body.peekBuffer());
   }
 
   String sketchName = body.readStringUntil('\n');
-  if (sketchName != _localSketchName) {
-    if (tracePackets) {
-      Serial.printf("Advertisement for sketch '%s', which is not our '%s'.\n", sketchName.c_str(),
-                    _localSketchName.c_str());
-    }
-  }
 
   int version = body.parseInt();
   if (version <= _localVersion) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Advertisement for version %d is not new.\n", version);
     }
     return;
@@ -408,7 +479,7 @@ void LazyMeshOta::_receiveAdvertise(const eth_addr& src, BufStream& body) {
 
   int nl = body.read();
   if (nl != '\n') {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Missing newline after version, '%c'\n", nl);
     }
     return;
@@ -416,7 +487,7 @@ void LazyMeshOta::_receiveAdvertise(const eth_addr& src, BufStream& body) {
 
   int sketchsize = body.parseInt();
   if (sketchsize <= 1) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Bad sketchsize %d\n", sketchsize);
     }
     return;
@@ -424,7 +495,7 @@ void LazyMeshOta::_receiveAdvertise(const eth_addr& src, BufStream& body) {
 
   nl = body.read();
   if (nl != '\n') {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Missing newline after sketchsize\n");
     }
     return;
@@ -432,8 +503,19 @@ void LazyMeshOta::_receiveAdvertise(const eth_addr& src, BufStream& body) {
 
   String md5 = body.readStringUntil('\n');
   if (md5.length() != 32) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("md5sum '%s' should be exactly 32 chars long\n", md5.c_str());
+    }
+    return;
+  }
+
+  schedule_function(
+      std::bind(&LazyMeshOta::Listener::onNeighborSeen, _listener, src, sketchName, version, md5));
+
+  if (sketchName != _localSketchName) {
+    if (tracePackets > 1) {
+      Serial.printf("Advertisement for sketch '%s', which is not our '%s'.\n", sketchName.c_str(),
+                    _localSketchName.c_str());
     }
     return;
   }
@@ -441,7 +523,7 @@ void LazyMeshOta::_receiveAdvertise(const eth_addr& src, BufStream& body) {
   String bssidStr = body.readStringUntil('\n');
   eth_addr bssid;
   if (!ethFromString(&bssid, bssidStr)) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.println("Unable to process bssid '" + bssidStr + "'");
     }
     return;
@@ -452,11 +534,12 @@ void LazyMeshOta::_receiveAdvertise(const eth_addr& src, BufStream& body) {
 
 void LazyMeshOta::_startUpdate(const eth_addr& src, const eth_addr& bssid, int version,
                                uint32_t sketchsize, String md5sum) {
-  if (tracePackets) {
+  schedule_function(std::bind(&Listener::onStartUpgrade, _listener, src, version, md5sum));
+  if (tracePackets > 1) {
     Serial.println("Starting update? src=" + ethToString(src) + " bssid=" + ethToString(bssid));
   }
   if (_update && _update->version < version) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.println("Aborting previous update!");
     }
     Update.end();
@@ -465,7 +548,7 @@ void LazyMeshOta::_startUpdate(const eth_addr& src, const eth_addr& bssid, int v
   }
 
   if (_update) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.println("Except not, since there's an update already in progress.");
     }
     // Update already in progress.
@@ -488,25 +571,26 @@ void LazyMeshOta::_startUpdate(const eth_addr& src, const eth_addr& bssid, int v
 void LazyMeshOta::_requestNextBlock() {
   assert(_update);
 
-  if (tracePackets) {
+  if (tracePackets > 1) {
     Serial.printf("Requesting next block at %u/%u\n", _update->offset, _update->size);
   }
 
   if (_update->offset == _update->size) {
     // Update complete!
     if (!Update.end()) {
-      Serial.println("Update error:");
+      schedule_function(std::bind(&Listener::onError, _listener, "Update failed"));
       Update.printError(Serial);
     } else {
-      Serial.println("Update succeded; restarting");
-      _updateSucceeded = true;
-      espRestart();
+      _terminate = true;
+      schedule_function(std::bind(&Listener::onDoneUpgrade, _listener));
     }
     delete _update;
     _update = nullptr;
     return;
   }
 
+  schedule_function(
+      std::bind(&Listener::onRequestChunk, _listener, _update->offset, _update->size));
   _transmit(PKT_TYPE::REQ, _update->src, _update->bssid,
             ethToString(_getLocalBssid()) + "\n" + String(_update->offset) + "\n");
   _nextReceiveTimeout = millis() + receiveTimeoutInterval;
@@ -515,19 +599,21 @@ void LazyMeshOta::_requestNextBlock() {
 void LazyMeshOta::_receiveTimeout() {
   assert(_update);
 
+  schedule_function(std::bind(&Listener::onReceiveTimeout, _listener));
   ++_update->retryCount;
   if (_update->retryCount > maxRetries) {
     Update.end();
     delete _update;
     _update = nullptr;
 
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.println("Update exceeded max retries");
     }
+    schedule_function(std::bind(&Listener::onError, _listener, "Exceeded max retries"));
     return;
   }
 
-  if (tracePackets) {
+  if (tracePackets > 1) {
     Serial.println("Resending due to timeout");
   }
 
@@ -535,14 +621,14 @@ void LazyMeshOta::_receiveTimeout() {
 }
 
 void LazyMeshOta::_receiveReq(const eth_addr& src, BufStream& body) {
-  if (tracePackets) {
+  if (tracePackets > 1) {
     Serial.printf("Request received '%s'\n", body.peekBuffer());
   }
   // "<src bssid>\n<start>\n".
   String bssidStr = body.readStringUntil('\n');
   eth_addr bssid;
   if (!ethFromString(&bssid, bssidStr)) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.println("Could not parse bssid " + bssidStr);
     }
     return;
@@ -550,7 +636,7 @@ void LazyMeshOta::_receiveReq(const eth_addr& src, BufStream& body) {
 
   uint32_t startOffset = body.parseInt();
   if (startOffset >= _localSketchSize) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Start offset %u larger than local sketch size %u\n", startOffset,
                     _localSketchSize);
     }
@@ -562,35 +648,43 @@ void LazyMeshOta::_receiveReq(const eth_addr& src, BufStream& body) {
     len = _localSketchSize - startOffset;
   }
 
-  if (tracePackets) {
+  if (tracePackets > 1) {
     Serial.printf("Replying with %u bytes of flash, %u-%u/%u\n", len, startOffset,
                   startOffset + len, _localSketchSize);
   }
 
+  debugPutchar('<');
+  schedule_function(
+      std::bind(&Listener::onSendProgress, _listener, src, startOffset, len, _localSketchSize));
+
   String reply = String(startOffset) + "\n";
   uint8_t buf[len];
   if (!flashRead(startOffset, buf, len)) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.print("Reading from flash failed");
     }
+    schedule_function(std::bind(&Listener::onError, _listener, "Reading from flash failed"));
     return;
   }
 
   if (!concatString(&reply, (char*)buf, len)) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.print("Unable to concat to reply!");
     }
+
+    schedule_function(std::bind(&Listener::onError, _listener, "Unable to concat to reply"));
     return;
   }
   _transmit(PKT_TYPE::REPLY, src, bssid, reply);
 }
 
 void LazyMeshOta::_receiveReply(const eth_addr& /* src */, BufStream& body) {
-  if (tracePackets) {
+  debugPutchar('$');
+  if (tracePackets > 1) {
     Serial.printf("Reply received '%s'\n", body.peekBuffer());
   }
   if (!_update) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.print("No update in progress!\n");
     }
     return;
@@ -598,43 +692,77 @@ void LazyMeshOta::_receiveReply(const eth_addr& /* src */, BufStream& body) {
 
   uint32_t startOffset = body.parseInt();
   if (startOffset != _update->offset) {
-    if (tracePackets) {
-      Serial.printf("Wrong start offset; received %u but we're at %u\n", startOffset,
-                    _update->offset);
-    }
+    char buf[100];
+    sprintf(buf, "Wrong start offset; received %u but we're at %u", startOffset, _update->offset);
+    debugPutchar('~');
+    schedule_function(std::bind(&Listener::onError, _listener, String(buf)));
     return;
   }
+  debugPutchar('k');
 
   int nl = body.read();
   if (nl != '\n') {
-    if (tracePackets) {
-      Serial.printf("Missing newline after received replyoffset\n");
+    if (tracePackets > 1) {
+      Serial.printf("Missing newline after received reply offset\n");
     }
     return;
   }
 
   uint32_t size = body.peekAvailable();
   if (size + startOffset > _update->size) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Size %u + startoffset %u too big for sketch size %u\n", size, startOffset,
                     _update->size);
     }
     return;
   }
 
-  body.align();
   uint32_t writelen = Update.write((uint8_t*)body.peekBuffer(), size);
   if (writelen != size) {
-    if (tracePackets) {
+    if (tracePackets > 1) {
       Serial.printf("Tried to write %u to updater, but only got %u\n", size, writelen);
     }
     return;
   }
 
-  if (tracePackets) {
+  if (tracePackets > 1) {
     Serial.printf("Sent %u bytes to updater at offset %u\n", writelen, startOffset);
   }
   _update->offset += writelen;
   _update->retryCount = 0;
   _requestNextBlock();
 }
+
+void LazyMeshOta::Listener::onNeighborSeen(eth_addr src, String sketchName, int version,
+                                           String md5) {
+  Serial.printf("LazyMeshOta: Neighbor %s seen running %s version %d (%s)\n",
+                ethToString(src).c_str(), sketchName.c_str(), version, md5.c_str());
+}
+
+void LazyMeshOta::Listener::onStartUpgrade(eth_addr src, int version, String md5) {
+  Serial.printf("LazyMeshOta: Starting to upgrade this node to version %d (%s) from %s\n", version,
+                md5.c_str(), ethToString(src).c_str());
+}
+
+void LazyMeshOta::Listener::onDoneUpgrade() {
+  Serial.println("LazyMeshOta: Upgrade completed");
+  espRestart();
+}
+
+void LazyMeshOta::Listener::onSendProgress(eth_addr src, size_t start, size_t len,
+                                           size_t tot_size) {
+  Serial.printf("LazyMeshOta: Sending image %u-%u/%u (%.2f%%) to upgrade client %s\n", start,
+                start + len, tot_size, (start + len) * 100. / tot_size, ethToString(src).c_str());
+}
+void LazyMeshOta::Listener::onRequestChunk(size_t start, size_t tot_size) {
+  Serial.printf("LazyMeshOta: Requesting new image chunk %u/%u (%.2f%%)\n", start, tot_size,
+                start * 100. / tot_size);
+}
+
+void LazyMeshOta::Listener::onReceiveTimeout() {
+  Serial.printf("LazyMeshOta: Timeout; rerequesting\n");
+}
+
+void LazyMeshOta::Listener::onError(String err) {
+  Serial.printf("LazyMeshOta: ERROR: %s\n", err.c_str());
+};
