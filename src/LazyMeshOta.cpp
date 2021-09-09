@@ -139,14 +139,16 @@ struct LazyMeshOta::hdr_t {
 
   // 802.2 LLC PDU fields.  Not needed for us to understand ourself,
   // but useful for tcpdump output.
-  uint8_t dsap = 0x31;
-  uint8_t ssap = 0x31;
+  static constexpr uint8_t LMO_ETH_SAP_ID = 0x31;
+  uint8_t dsap = LMO_ETH_SAP_ID;
+  uint8_t ssap = LMO_ETH_SAP_ID;
   uint16_t llc_pdu_ctrl = 0;
 
   // Our protocol data:
   uint16_t len = 0;
   PKT_TYPE packetType;
 };
+constexpr uint8_t LazyMeshOta::hdr_t::LMO_ETH_SAP_ID;
 
 void LazyMeshOta::_tracePacket(uint8_t* pkt, uint32_t len, uint32_t hdr_start) {
   Serial.println("Packet of length " + String(len) + " hdr_start=" + String(hdr_start));
@@ -304,7 +306,7 @@ void LazyMeshOta::_transmit(PKT_TYPE pkt_type, eth_addr dest, eth_addr bssid, St
 
 void LazyMeshOta::onReceiveRawFrameCallback(RxPacket* pkt) {
   hdr_t* hdr = reinterpret_cast<hdr_t*>(pkt->data);
-  if (hdr->dsap != hdr_t().dsap) {
+  if (hdr->dsap != hdr_t::LMO_ETH_SAP_ID) {
     // Different protocol than ours; skip.
     if (tracePackets > 1) {
       Serial.printf("dsap(%02x)", hdr->dsap);
@@ -355,7 +357,7 @@ eth_addr LazyMeshOta::_getLocalBssid() {
 bool LazyMeshOta::onReceiveRawFrame(RxPacket* pkt) {
   uint8_t* frm = pkt->data;
   uint32_t tot_len = pkt->rx_ctl.legacy_length;
-  if (tracePackets || true) {
+  if (tracePackets) {
     debugPutchar('X');
   }
   if (tracePackets > 2) {
@@ -369,7 +371,7 @@ bool LazyMeshOta::onReceiveRawFrame(RxPacket* pkt) {
     return false;
   }
   hdr_t* hdr = reinterpret_cast<hdr_t*>(frm);
-  if (hdr->dsap != hdr_t().dsap || hdr->ssap != hdr_t().ssap) {
+  if (hdr->dsap != hdr_t::LMO_ETH_SAP_ID || hdr->ssap != hdr_t::LMO_ETH_SAP_ID) {
     // Different protocol than ours; skip.
     if (tracePackets > 1) {
       Serial.printf("dsap(%02x)", hdr->dsap);
@@ -408,7 +410,7 @@ bool LazyMeshOta::onReceiveRawFrame(RxPacket* pkt) {
     free(pkt);
     return false;
   }
-  if (hdr->ssap != hdr_t().ssap) {
+  if (hdr->ssap != hdr_t::LMO_ETH_SAP_ID) {
     if (tracePackets > 1) {
       Serial.printf("Wrong ssap %02x\n", hdr->ssap);
     }
@@ -534,7 +536,12 @@ void LazyMeshOta::_receiveAdvertise(const eth_addr& src, BufStream& body) {
 
 void LazyMeshOta::_startUpdate(const eth_addr& src, const eth_addr& bssid, int version,
                                uint32_t sketchsize, String md5sum) {
-  schedule_function(std::bind(&Listener::onStartUpgrade, _listener, src, version, md5sum));
+  if (sketchsize > ESP.getFreeSketchSpace()) {
+    schedule_function(
+        std::bind(&Listener::onError, _listener, "Sketch too big; not enough space free"));
+    return;
+  }
+
   if (tracePackets > 1) {
     Serial.println("Starting update? src=" + ethToString(src) + " bssid=" + ethToString(bssid));
   }
@@ -554,6 +561,8 @@ void LazyMeshOta::_startUpdate(const eth_addr& src, const eth_addr& bssid, int v
     // Update already in progress.
     return;
   }
+
+  schedule_function(std::bind(&Listener::onStartUpgrade, _listener, src, version, md5sum));
 
   _update = new update_t;
   _update->version = version;
@@ -578,8 +587,10 @@ void LazyMeshOta::_requestNextBlock() {
   if (_update->offset == _update->size) {
     // Update complete!
     if (!Update.end()) {
-      schedule_function(std::bind(&Listener::onError, _listener, "Update failed"));
-      Update.printError(Serial);
+      schedule_function([this]() {
+        _listener->onError("Update failed");
+        Update.printError(Serial);
+      });
     } else {
       _terminate = true;
       schedule_function(std::bind(&Listener::onDoneUpgrade, _listener));
