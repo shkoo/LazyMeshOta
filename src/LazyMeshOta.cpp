@@ -41,6 +41,8 @@ static bool flashRead(uint32_t address, uint8_t* data, size_t size) {
   return ESP.flashRead(address, data, size);
 }
 
+static uint32_t getFreeSketchSpace() { return ESP.getFreeSketchSpace(); }
+
 static String getSketchMD5() { return ESP.getSketchMD5(); }
 
 static uint32_t getSketchSize() { return ESP.getSketchSize(); }
@@ -62,6 +64,10 @@ static bool concatString(String* str, char* buf, size_t len) {
     len--;
   }
   return true;
+}
+
+static uint32_t getFreeSketchSpace() {
+  return 64 * 1024;  // 64k
 }
 
 #endif
@@ -536,7 +542,7 @@ void LazyMeshOta::_receiveAdvertise(const eth_addr& src, BufStream& body) {
 
 void LazyMeshOta::_startUpdate(const eth_addr& src, const eth_addr& bssid, int version,
                                uint32_t sketchsize, String md5sum) {
-  if (sketchsize > ESP.getFreeSketchSpace()) {
+  if (sketchsize > getFreeSketchSpace()) {
     schedule_function(
         std::bind(&Listener::onError, _listener, "Sketch too big; not enough space free"));
     return;
