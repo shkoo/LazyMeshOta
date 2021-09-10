@@ -10,15 +10,11 @@
 #if defined(EPOXY_DUINO)
 #include "fake_update.h"
 #include "fake_wifi.h"
-
-// Some virtual functions not supported by epoxy stubs.
-#define NON_EPOXY_OVERRIDE
 #else
+#include <Schedule.h>
 #include <lwip/prot/ethernet.h>
 #include <user_interface.h>
 #include <wifi_raw.h>  // https://github.com/shkoo/esp8266_wifi_raw
-#define NON_EPOXY_OVERRIDE override
-#include <Schedule.h>
 #endif
 
 // LazyMeshOta propagates a new version of firmware automatically when
@@ -124,12 +120,14 @@ class LazyMeshOta {
       }
       return _buf[_pos++];
     }
-    int read(uint8_t* buffer, size_t len) NON_EPOXY_OVERRIDE {
+#if STREAM_READ_RETURNS_INT
+    int read(uint8_t* buffer, size_t len) {
       assert(_len >= _pos);
       size_t actual = std::min<size_t>(len, _len - _pos);
       memcpy(buffer, _buf + _pos, actual);
       return actual;
     }
+#endif
     int peek() override {
       assert(_len >= _pos);
       if (_len == _pos) {
@@ -138,25 +136,32 @@ class LazyMeshOta {
       return _buf[_pos];
     }
 
-    bool hasPeekBufferAPI() const NON_EPOXY_OVERRIDE { return true; }
+#if STREAMSEND_API
+#define STREAMSEND_OVERRIDE override
+#else
+#define STREAMSEND_OVERRIDE
+#endif
+    bool hasPeekBufferAPI() const STREAMSEND_OVERRIDE { return true; }
 
-    size_t peekAvailable() NON_EPOXY_OVERRIDE {
+    size_t peekAvailable() STREAMSEND_OVERRIDE {
       assert(_len >= _pos);
       return _len - _pos;
     }
 
-    const char* peekBuffer() NON_EPOXY_OVERRIDE {
+    const char* peekBuffer() STREAMSEND_OVERRIDE {
       assert(_len >= _pos);
       return _buf + _pos;
     }
 
-    void peekConsume(size_t consume) NON_EPOXY_OVERRIDE {
+    void peekConsume(size_t consume) STREAMSEND_OVERRIDE {
       assert(_len >= _pos);
       assert(consume + _pos <= _len);
       _pos += consume;
     }
 
-    bool inputCanTimeout() NON_EPOXY_OVERRIDE { return false; }
+    bool inputCanTimeout() STREAMSEND_OVERRIDE { return false; }
+#undef STREAMSEND_OVERRIDE
+
     virtual size_t write(uint8_t) override { return 0; }
 
    private:
